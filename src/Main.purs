@@ -3,18 +3,22 @@ module Main where
 import Prelude
 
 import Control.Monad.Eff (Eff)
+import Control.Monad.Eff.Class (liftEff)
+import Control.Monad.Eff.Console (log)
 import Control.Monad.IO.Effect (INFINITY)
 import Control.Monad.IOSync (runIOSync)
+import Control.Monad.IOSync.Class (class MonadIOSync, liftIOSync)
 import Data.Array as Array
 import Data.Foldable (for_)
 import Data.Monoid (mempty)
-import Specular.Dom.Builder.Class (el, elAttr, rawHtml, text)
+import Specular.Dom.Builder.Class (dynText, el, elAttr, rawHtml, text)
 import Specular.Dom.Node.Class ((:=))
 import Specular.Dom.Widget (class MonadWidget, runMainWidgetInBody)
 import Specular.Dom.Widgets.Button (buttonOnClick)
 import Specular.Dom.Widgets.Input (checkbox)
-import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, fixFRP_, never, weakDynamic_)
-import Specular.FRP.Base (for)
+import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, changed, fixFRP, fixFRP_, foldDyn, holdDyn, leftmost, never, subscribeDyn_, switchWeakDyn, weakDynamic_)
+import Specular.FRP.Base (for, hostEffect, subscribeEvent_)
+import Specular.FRP.Replaceable (weakDynamic)
 
 main :: Eff (infinity :: INFINITY) Unit
 main = runIOSync $ runMainWidgetInBody mainWidget
@@ -50,28 +54,40 @@ mainControl :: forall m. MonadFRP m
     { tasks :: Dynamic (Array Task)
     , numTasksLeft :: Dynamic Int
     , anyCompletedTasks :: Dynamic Boolean
+    , allCompleted :: Dynamic Boolean
     }
-mainControl _ = do
-  let
-    tasks = pure initialTasks
+mainControl control = do
 
+  let
+    changeTasks = leftmost
+      [ map (\completed -> map (_ { completed = completed })) control.toggleAll
+      , Array.filter (not <<< _.completed) <$ control.clearCompleted
+      ]
+
+  tasks <- foldDyn ($) initialTasks changeTasks
+
+  let
     numTasksLeft = map (Array.length <<< Array.filter (not <<< _.completed)) tasks
 
-    anyCompletedTasks = map (not <<< Array.null <<< Array.filter _.completed) tasks
+    anyCompletedTasks = map (Array.any _.completed) tasks
+
+    allCompleted = map (Array.all _.completed) tasks
 
   pure
     { tasks
     , numTasksLeft
     , anyCompletedTasks
+    , allCompleted
     }
 
 mainView :: forall m. MonadWidget m
   => { tasks :: WeakDynamic (Array Task)
      , numTasksLeft :: WeakDynamic Int
      , anyCompletedTasks :: WeakDynamic Boolean
+     , allCompleted :: WeakDynamic Boolean
      }
   -> m Control
-mainView {tasks,numTasksLeft,anyCompletedTasks} = do
+mainView {tasks,numTasksLeft,anyCompletedTasks,allCompleted} = do
   control <- elAttr "section" ("class" := "todoapp") $ do
     {newTodo} <- elAttr "header" ("class" := "header") $ do
       el "h1" $ text "todos"
@@ -79,7 +95,7 @@ mainView {tasks,numTasksLeft,anyCompletedTasks} = do
 
 		-- This section should be hidden by default and shown when there are todos
     {toggleAll,editTasks} <- elAttr "section" ("class" := "main") $ do
-      {toggleAll} <- toggleAllCheckbox
+      {toggleAll} <- toggleAllCheckbox {allCompleted}
       {editTasks} <- taskList {tasks}
       pure {toggleAll,editTasks}
 
@@ -98,24 +114,22 @@ mainView {tasks,numTasksLeft,anyCompletedTasks} = do
 
 newTodoInput :: forall m. MonadWidget m
   => m { newTodo :: Event NewTask }
-newTodoInput = do
+newTodoInput = do --fixFRP $ \input -> do
   rawHtml
     """
     <input class="new-todo" placeholder="What needs to be done?" autofocus>
     """
-
   pure { newTodo: never }
 
 toggleAllCheckbox :: forall m. MonadWidget m
-  => m { toggleAll :: Event Boolean }
-toggleAllCheckbox = do
-  rawHtml
-    """
-		<input id="toggle-all" class="toggle-all" type="checkbox">
-		<label for="toggle-all">Mark all as complete</label>
-    """
+  => { allCompleted :: WeakDynamic Boolean }
+  -> m { toggleAll :: Event Boolean }
+toggleAllCheckbox {allCompleted} = do
+  toggleAll <- map switchWeakDyn $ weakDynamic $ for allCompleted $ \allCompleted' ->
+    changed <$> checkbox allCompleted' ("class" := "toggle-all" <> "id" := "toggle-all")
+  elAttr "label" ("for" := "toggle-all") $ text "Mark all as complete"
 
-  pure { toggleAll: never }
+  pure { toggleAll }
 
 taskList :: forall m. MonadWidget m
   => { tasks :: WeakDynamic (Array Task) }
@@ -172,14 +186,15 @@ clearCompletedButton :: forall m. MonadWidget m
   -> m { clearCompleted :: Event Unit }
 clearCompletedButton {anyCompletedTasks} = do
   -- Hidden if no completed items are left
-  weakDynamic_ $ for anyCompletedTasks $ \anyCompletedTasks' ->
-    when anyCompletedTasks' $
-      rawHtml
-        """
-        <button class="clear-completed">Clear completed</button>
-        """
+  clearCompleted <- map switchWeakDyn $ weakDynamic $
+    for anyCompletedTasks $ \anyCompletedTasks' ->
+      if anyCompletedTasks'
+        then
+          buttonOnClick (pure ("class" := "clear-completed")) $ text "Clear completed"
+        else
+          pure never
 
-  pure { clearCompleted: never }
+  pure { clearCompleted }
 
 infoFooter :: forall m. MonadWidget m => m Unit
 infoFooter =
