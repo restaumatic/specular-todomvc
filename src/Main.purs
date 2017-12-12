@@ -3,21 +3,19 @@ module Main where
 import Prelude
 
 import Control.Monad.Eff (Eff)
-import Control.Monad.Eff.Class (liftEff)
-import Control.Monad.Eff.Console (log)
 import Control.Monad.IO.Effect (INFINITY)
 import Control.Monad.IOSync (runIOSync)
-import Control.Monad.IOSync.Class (class MonadIOSync, liftIOSync)
 import Data.Array as Array
 import Data.Foldable (for_)
 import Data.Monoid (mempty)
-import Specular.Dom.Builder.Class (dynText, el, elAttr, rawHtml, text)
+import Data.Tuple (Tuple(..))
+import Specular.Dom.Builder.Class (el, elAttr, rawHtml, text)
 import Specular.Dom.Node.Class ((:=))
 import Specular.Dom.Widget (class MonadWidget, runMainWidgetInBody)
 import Specular.Dom.Widgets.Button (buttonOnClick)
-import Specular.Dom.Widgets.Input (checkbox)
-import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, changed, fixFRP, fixFRP_, foldDyn, holdDyn, leftmost, never, subscribeDyn_, switchWeakDyn, weakDynamic_)
-import Specular.FRP.Base (for, hostEffect, subscribeEvent_)
+import Specular.Dom.Widgets.Input (checkbox, textInput, textInputValueEventOnEnter)
+import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, changed, filterEvent, fixFRP, fixFRP_, foldDyn, leftmost, never, switchWeakDyn, weakDynamic_)
+import Specular.FRP.Base (for)
 import Specular.FRP.Replaceable (weakDynamic)
 
 main :: Eff (infinity :: INFINITY) Unit
@@ -57,11 +55,12 @@ mainControl :: forall m. MonadFRP m
     , allCompleted :: Dynamic Boolean
     }
 mainControl control = do
-
   let
     changeTasks = leftmost
       [ map (\completed -> map (_ { completed = completed })) control.toggleAll
       , Array.filter (not <<< _.completed) <$ control.clearCompleted
+      , map (\{description} tasks -> Array.snoc tasks {description, completed: false})
+          control.newTodo
       ]
 
   tasks <- foldDyn ($) initialTasks changeTasks
@@ -114,12 +113,25 @@ mainView {tasks,numTasksLeft,anyCompletedTasks,allCompleted} = do
 
 newTodoInput :: forall m. MonadWidget m
   => m { newTodo :: Event NewTask }
-newTodoInput = do --fixFRP $ \input -> do
-  rawHtml
-    """
-    <input class="new-todo" placeholder="What needs to be done?" autofocus>
-    """
-  pure { newTodo: never }
+newTodoInput = fixFRP $ \input -> do
+  widget <- textInput
+    { initialValue: ""
+    , setValue: input.setValue
+    , attributes: pure $
+           "class" := "new-todo"
+        <> "placeholder" := "What needs to be done?"
+        <> "autofocus" := "autofocus"
+    }
+
+  entered <- textInputValueEventOnEnter widget
+
+  let
+    setValue = "" <$ entered
+    newTodo = map (\value -> { description: value }) $ filterEvent (_ /= "") entered
+
+  pure $ Tuple
+    { setValue }
+    { newTodo }
 
 toggleAllCheckbox :: forall m. MonadWidget m
   => { allCompleted :: WeakDynamic Boolean }
