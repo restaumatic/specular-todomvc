@@ -6,17 +6,19 @@ import Control.Monad.Eff (Eff)
 import Control.Monad.IO.Effect (INFINITY)
 import Control.Monad.IOSync (runIOSync)
 import Data.Array as Array
-import Data.Foldable (for_)
+import Data.Maybe (Maybe(..), fromMaybe)
 import Data.Monoid (mempty)
+import Data.TraversableWithIndex (traverseWithIndex)
 import Data.Tuple (Tuple(..))
 import Specular.Dom.Builder.Class (el, elAttr, rawHtml, text)
 import Specular.Dom.Node.Class ((:=))
 import Specular.Dom.Widget (class MonadWidget, runMainWidgetInBody)
 import Specular.Dom.Widgets.Button (buttonOnClick)
 import Specular.Dom.Widgets.Input (checkbox, textInput, textInputValueEventOnEnter)
-import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, changed, filterEvent, fixFRP, fixFRP_, foldDyn, leftmost, never, switchWeakDyn, weakDynamic_)
+import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, changed, filterEvent, fixFRP, fixFRP_, foldDyn, leftmost, never, weakDynamic_)
 import Specular.FRP.Base (for)
 import Specular.FRP.Replaceable (weakDynamic)
+import Specular.FRP.WeakDynamic (switchWeakDyn)
 
 main :: Eff (infinity :: INFINITY) Unit
 main = runIOSync $ runMainWidgetInBody mainWidget
@@ -61,6 +63,7 @@ mainControl control = do
       , Array.filter (not <<< _.completed) <$ control.clearCompleted
       , map (\{description} tasks -> Array.snoc tasks {description, completed: false})
           control.newTodo
+      , control.editTasks
       ]
 
   tasks <- foldDyn ($) initialTasks changeTasks
@@ -148,20 +151,38 @@ taskList :: forall m. MonadWidget m
   -> m { editTasks :: Event (Array Task -> Array Task) }
 taskList {tasks} = do
   -- List items should get the class `editing` when editing and `completed` when marked as completed
-  elAttr "ul" ("class" := "todo-list") $
-    weakDynamic_ $ for tasks $ \tasks' ->
-      for_ tasks' $ \task -> do
-        let attrs = if task.completed then ("class" := "completed") else mempty
+  editTasks <- elAttr "ul" ("class" := "todo-list") $
+    map switchWeakDyn $ weakDynamic $ for tasks $ \tasks' ->
+      leftmost <$> traverseWithIndex
+        (\index task -> do
+            taskChange <- taskWidget task
+            pure $ map (alterAt' index) taskChange
+        ) tasks'
 
-        elAttr "li" attrs $ do
-          elAttr "div" ("class" := "view") $ do
-            void $ checkbox task.completed ("class" := "toggle")
-            el "label" $ text task.description
-            void $ buttonOnClick (pure $ "class" := "destroy") (pure unit)
+  pure { editTasks }
 
-          rawHtml """<input class="edit" value="Create a TodoMVC template">"""
+alterAt' :: forall a. Int -> (a -> Maybe a) -> Array a -> Array a
+alterAt' index f array = fromMaybe array $ Array.alterAt index f array
 
-  pure { editTasks: never }
+taskWidget :: forall m. MonadWidget m
+  => Task
+  -> m (Event (Task -> Maybe Task))
+taskWidget task = do
+  let attrs = if task.completed then ("class" := "completed") else mempty
+
+  elAttr "li" attrs $ do
+    elAttr "div" ("class" := "view") $ do
+      setCompleted <- changed <$> checkbox task.completed ("class" := "toggle")
+      el "label" $ text task.description
+      delete <- buttonOnClick (pure $ "class" := "destroy") (pure unit)
+
+      pure $ leftmost
+        [ (\_ -> Nothing) <$ delete
+        , (\completed t -> Just (t { completed = completed })) <$> setCompleted
+        ]
+
+--    rawHtml """<input class="edit" value="Create a TodoMVC template">"""
+
 
 itemsLeftCounter :: forall m. MonadWidget m
   => { numTasksLeft :: WeakDynamic Int }
