@@ -3,27 +3,21 @@ module Main where
 import Prelude
 
 import Control.Apply (lift2)
-import Control.Monad.Eff (Eff)
-import Control.Monad.IO.Effect (INFINITY)
-import Control.Monad.IOSync (runIOSync)
 import Data.Array as Array
 import Data.Maybe (Maybe(..), fromMaybe)
-import Data.Monoid (class Monoid, mempty)
 import Data.String (joinWith)
 import Data.Tuple (Tuple(..))
+import Effect (Effect)
 import Specular.Dom.Builder.Class (domEventWithSample, dynText, el, elAttr, elDynAttr, elDynAttr', rawHtml, text)
 import Specular.Dom.Node.Class ((:=))
 import Specular.Dom.Widget (class MonadWidget, runMainWidgetInBody)
 import Specular.Dom.Widgets.Button (buttonOnClick)
 import Specular.Dom.Widgets.Input (checkboxView, textInput, textInputValueEventOnEnter)
-import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, filterEvent, fixFRP, fixFRP_, foldDyn, holdDyn, leftmost, never, tagWeakDyn, weakDynamic_)
-import Specular.FRP.Base (for)
+import Specular.FRP (class MonadFRP, Dynamic, Event, WeakDynamic, filterEvent, fixFRP, foldDyn, holdDyn, leftmost, never, switchWeakDyn, tagWeakDyn, weakDynamic, weakDynamic_)
 import Specular.FRP.List (weakDynamicList)
-import Specular.FRP.Replaceable (weakDynamic)
-import Specular.FRP.WeakDynamic (switchWeakDyn)
 
-main :: Eff (infinity :: INFINITY) Unit
-main = runIOSync $ runMainWidgetInBody mainWidget
+main :: Effect Unit
+main = runMainWidgetInBody mainWidget
 
 type NewTask =
   { description :: String
@@ -41,7 +35,7 @@ initialTasks = join $ Array.replicate 15 $
   ]
 
 mainWidget :: forall m. MonadWidget m => m Unit
-mainWidget = fixFRP_ $ mainView >=> mainControl
+mainWidget = fixFRP $ mainView >=> mainControl
 
 type Control =
   { newTodo :: Event NewTask
@@ -50,20 +44,26 @@ type Control =
   , clearCompleted :: Event Unit
   }
 
-mainControl :: forall m. MonadFRP m
+mainControl
+  :: forall m
+   . MonadFRP m
   => Control
   -> m
-    { tasks :: Dynamic (Array Task)
-    , numTasksLeft :: Dynamic Int
-    , anyCompletedTasks :: Dynamic Boolean
-    , allCompleted :: Dynamic Boolean
-    }
+       ( Tuple
+           ( { tasks :: Dynamic (Array Task)
+             , numTasksLeft :: Dynamic Int
+             , anyCompletedTasks :: Dynamic Boolean
+             , allCompleted :: Dynamic Boolean
+             }
+           )
+           Unit
+       )
 mainControl control = do
   let
     changeTasks = leftmost
       [ map (\completed -> map (_ { completed = completed })) control.toggleAll
       , Array.filter (not <<< _.completed) <$ control.clearCompleted
-      , map (\{description} tasks -> Array.snoc tasks {description, completed: false})
+      , map (\{ description } tasks -> Array.snoc tasks { description, completed: false })
           control.newTodo
       , control.editTasks
       ]
@@ -77,55 +77,58 @@ mainControl control = do
 
     allCompleted = map (Array.all _.completed) tasks
 
-  pure
-    { tasks
-    , numTasksLeft
-    , anyCompletedTasks
-    , allCompleted
-    }
+  pure $
+    Tuple
+      { tasks
+      , numTasksLeft
+      , anyCompletedTasks
+      , allCompleted
+      }
+      unit
 
-mainView :: forall m. MonadWidget m
+mainView
+  :: forall m
+   . MonadWidget m
   => { tasks :: WeakDynamic (Array Task)
      , numTasksLeft :: WeakDynamic Int
      , anyCompletedTasks :: WeakDynamic Boolean
      , allCompleted :: WeakDynamic Boolean
      }
   -> m Control
-mainView {tasks,numTasksLeft,anyCompletedTasks,allCompleted} = do
+mainView { tasks, numTasksLeft, anyCompletedTasks, allCompleted } = do
   control <- elAttr "section" ("class" := "todoapp") $ do
-    {newTodo} <- elAttr "header" ("class" := "header") $ do
+    { newTodo } <- elAttr "header" ("class" := "header") $ do
       el "h1" $ text "todos"
       newTodoInput
 
-		-- This section should be hidden by default and shown when there are todos
-    {toggleAll,editTasks} <- elAttr "section" ("class" := "main") $ do
-      {toggleAll} <- toggleAllCheckbox {allCompleted}
-      {editTasks} <- taskList {tasks}
-      pure {toggleAll,editTasks}
+    -- This section should be hidden by default and shown when there are todos
+    { toggleAll, editTasks } <- elAttr "section" ("class" := "main") $ do
+      { toggleAll } <- toggleAllCheckbox { allCompleted }
+      { editTasks } <- taskList { tasks }
+      pure { toggleAll, editTasks }
 
     -- This footer should hidden by default and shown when there are todos
-    {clearCompleted} <- elAttr "footer" ("class" := "footer") $ do 
-      itemsLeftCounter {numTasksLeft}
+    { clearCompleted } <- elAttr "footer" ("class" := "footer") $ do
+      itemsLeftCounter { numTasksLeft }
       filters
-      {clearCompleted} <- clearCompletedButton {anyCompletedTasks}
-      pure {clearCompleted}
+      { clearCompleted } <- clearCompletedButton { anyCompletedTasks }
+      pure { clearCompleted }
 
-    pure {newTodo,toggleAll,editTasks,clearCompleted}
+    pure { newTodo, toggleAll, editTasks, clearCompleted }
 
   infoFooter
 
   pure control
 
-newTodoInput :: forall m. MonadWidget m
-  => m { newTodo :: Event NewTask }
+newTodoInput :: forall m. MonadWidget m => m { newTodo :: Event NewTask }
 newTodoInput = fixFRP $ \input -> do
   widget <- textInput
     { initialValue: ""
     , setValue: input.setValue
     , attributes: pure $
-           "class" := "new-todo"
-        <> "placeholder" := "What needs to be done?"
-        <> "autofocus" := "autofocus"
+        "class" := "new-todo"
+          <> "placeholder" := "What needs to be done?"
+          <> "autofocus" := "autofocus"
     }
 
   entered <- textInputValueEventOnEnter widget
@@ -138,22 +141,28 @@ newTodoInput = fixFRP $ \input -> do
     { setValue }
     { newTodo }
 
-toggleAllCheckbox :: forall m. MonadWidget m
+toggleAllCheckbox
+  :: forall m
+   . MonadWidget m
   => { allCompleted :: WeakDynamic Boolean }
   -> m { toggleAll :: Event Boolean }
-toggleAllCheckbox {allCompleted} = do
-  toggleAll <- checkboxView allCompleted (pure $ "class" := "toggle-all" <> "id" := "toggle-all")
-  elAttr "label" ("for" := "toggle-all") $ text "Mark all as complete"
-
+toggleAllCheckbox { allCompleted } = do
+  toggleAll <- checkboxView
+    allCompleted
+    (pure $ "class" := "toggle-all" <> "id" := "toggle-all")
+  elAttr "label" ("for" := "toggle-all") do text "Mark all as complete"
   pure { toggleAll }
 
-taskList :: forall m. MonadWidget m
+taskList
+  :: forall m
+   . MonadWidget m
   => { tasks :: WeakDynamic (Array Task) }
   -> m { editTasks :: Event (Array Task -> Array Task) }
-taskList {tasks} = do
+taskList { tasks } = do
   -- List items should get the class `editing` when editing and `completed` when marked as completed
-  editTasks <- elAttr "ul" ("class" := "todo-list") $
-    map (switchWeakDyn <<< map applyEdits) $ weakDynamicList tasks taskWidget
+  editTasks <- elAttr "ul" ("class" := "todo-list")
+    $ map (switchWeakDyn <<< map applyEdits)
+    $ weakDynamicList tasks taskWidget
 
   pure { editTasks }
 
@@ -164,24 +173,31 @@ alterAt' :: forall a. Int -> (a -> Maybe a) -> Array a -> Array a
 alterAt' index f array = fromMaybe array $ Array.alterAt index f array
 
 type TaskInnerWidget =
-  forall m. MonadWidget m
+  forall m
+   . MonadWidget m
   => m
-    { commitEdit :: Event (Task -> Maybe Task)
-    , cancelEdit :: Event Unit
-    , startEditing :: Event Unit
-    }
+       { commitEdit :: Event (Task -> Maybe Task)
+       , cancelEdit :: Event Unit
+       , startEditing :: Event Unit
+       }
 
-taskWidget :: forall m. MonadWidget m
+taskWidget
+  :: forall m
+   . MonadWidget m
   => WeakDynamic Task
   -> m (Event (Task -> Maybe Task))
 taskWidget wdtask = fixFRP $ \input -> do
-  let attrs = lift2 (\task editing ->
-                      "class" := (joinWith " " $
-                                   mwhen editing ["editing"] <>
-                                   mwhen task.completed ["completed"])
-                    )
-                    wdtask
-                    input.editing
+  let
+    attrs = lift2
+      ( \task editing ->
+          "class" :=
+            ( joinWith " " $
+                mwhen editing [ "editing" ] <>
+                  mwhen task.completed [ "completed" ]
+            )
+      )
+      wdtask
+      input.editing
 
   let
     -- FIXME: This should be replaced by some Record-generic programming
@@ -193,17 +209,17 @@ taskWidget wdtask = fixFRP $ \input -> do
 
     editMode :: TaskInnerWidget
     editMode = do
-      map switchEvents $ weakDynamic $ for wdtask $ \task -> do
+      map switchEvents $ weakDynamic $ wdtask <#> \task -> do
         widget <- textInput
           { initialValue: task.description
           , setValue: never
           , attributes: pure $
               "class" := "edit" <>
-              "focused" := "focused"
+                "focused" := "focused"
           }
 
         entered <- textInputValueEventOnEnter widget
-        
+
         pure
           { commitEdit: map (\newText t -> Just (t { description = newText })) entered
           , cancelEdit: never -- TODO: cancel on escape
@@ -215,11 +231,11 @@ taskWidget wdtask = fixFRP $ \input -> do
       elAttr "div" ("class" := "view") $ do
         setCompleted <- checkboxView (map _.completed wdtask) (pure $ "class" := "toggle")
         Tuple label _ <- elDynAttr' "label" (pure mempty) $ dynText $ map _.description wdtask
-        delete <- buttonOnClick (pure $ "class" := "destroy") (pure unit)
+        delete <- buttonOnClick (pure $ "class" := "destroy") $ pure unit
 
         startEditing <-
           map (void <<< filterEvent (not <<< _.completed) <<< tagWeakDyn wdtask) $
-          domEventWithSample (\_ -> pure unit) "dblclick" label
+            domEventWithSample (\_ -> pure unit) "dblclick" label
 
         pure
           { commitEdit: leftmost
@@ -230,11 +246,10 @@ taskWidget wdtask = fixFRP $ \input -> do
           , startEditing
           }
 
-  {commitEdit,cancelEdit,startEditing} <- elDynAttr "li" attrs $ do
-    map switchEvents $ weakDynamic $ for input.editing $ \editing ->
-      if editing
-        then editMode
-        else viewMode
+  { commitEdit, cancelEdit, startEditing } <- elDynAttr "li" attrs $ do
+    map switchEvents $ weakDynamic $ input.editing <#> \editing ->
+      if editing then editMode
+      else viewMode
 
   editing <- holdDyn false $ leftmost
     [ false <$ cancelEdit
@@ -243,32 +258,31 @@ taskWidget wdtask = fixFRP $ \input -> do
     ]
 
   pure $ Tuple
-    {editing}
+    { editing }
     commitEdit
 
 mwhen :: forall m. Monoid m => Boolean -> m -> m
 mwhen false _ = mempty
 mwhen true x = x
 
-for2 :: forall f a b c. Applicative f => f a -> f b -> (a -> b -> c) -> f c
-for2 x y f = lift2 f x y
-
-itemsLeftCounter :: forall m. MonadWidget m
+itemsLeftCounter
+  :: forall m
+   . MonadWidget m
   => { numTasksLeft :: WeakDynamic Int }
   -> m Unit
-itemsLeftCounter {numTasksLeft} = do
-  elAttr "span" ("class" := "todo-count") $
-    weakDynamic_ $ for numTasksLeft $ \numTasksLeft' ->
-      rawHtml $ "<strong>" <> show numTasksLeft' <> "</strong> item left</span>"
-        -- TODO: pluralization
+itemsLeftCounter { numTasksLeft } = do
+  elAttr "span" ("class" := "todo-count")
+    $ weakDynamic_
+    $ numTasksLeft
+        <#> \numTasksLeft' ->
+          rawHtml $ "<strong>" <> show numTasksLeft' <> "</strong> item left</span>"
 
 filters :: forall m. MonadWidget m => m Unit
 filters =
   -- TODO: implement routing and filters
   when false $
-
-  rawHtml
-    """
+    rawHtml
+      """
 		<!-- Remove this if you don't implement routing -->
 		<ul class="filters">
 			<li>
@@ -283,18 +297,20 @@ filters =
 		</ul>
     """
 
-clearCompletedButton :: forall m. MonadWidget m
+clearCompletedButton
+  :: forall m
+   . MonadWidget m
   => { anyCompletedTasks :: WeakDynamic Boolean }
   -> m { clearCompleted :: Event Unit }
-clearCompletedButton {anyCompletedTasks} = do
+clearCompletedButton { anyCompletedTasks } = do
   -- Hidden if no completed items are left
-  clearCompleted <- map switchWeakDyn $ weakDynamic $
-    for anyCompletedTasks $ \anyCompletedTasks' ->
-      if anyCompletedTasks'
-        then
-          buttonOnClick (pure ("class" := "clear-completed")) $ text "Clear completed"
-        else
-          pure never
+  clearCompleted <- map switchWeakDyn $ weakDynamic
+    $ anyCompletedTasks
+        <#> \anyCompletedTasks' ->
+          if anyCompletedTasks' then
+            buttonOnClick (pure ("class" := "clear-completed")) $ text "Clear completed"
+          else
+            pure never
 
   pure { clearCompleted }
 
